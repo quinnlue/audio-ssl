@@ -7,6 +7,7 @@ import math
 import torch
 
 from audiossl.config import TemporalMaskingConfig
+from audiossl.rng import generator_device
 
 
 def _validate_valid_mask(valid_mask: torch.Tensor) -> None:
@@ -58,7 +59,7 @@ def _validate_masking_config(config: TemporalMaskingConfig) -> None:
 def _sample_index(num_items: int, generator: torch.Generator | None) -> int:
     if num_items <= 0:
         raise ValueError("num_items must be positive")
-    device = getattr(generator, "device", torch.device("cpu")) if generator is not None else "cpu"
+    device = generator_device(generator)
     return int(torch.randint(num_items, (1,), generator=generator, device=device).item())
 
 

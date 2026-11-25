@@ -7,6 +7,7 @@ import math
 import torch
 
 from audiossl.config import SpanMaskingConfig
+from audiossl.rng import generator_device
 
 from ._base import MaskingStrategy, validate_mask_inputs
 
@@ -73,7 +74,11 @@ class SpanMaskingStrategy(MaskingStrategy):
             valid_len = int(valid_indices.numel())
             if valid_len == 0:
                 continue
-            span_lengths = self._sample_lengths(valid_len, generator=generator)
+            span_lengths = self._sample_lengths(
+                valid_len,
+                generator=generator,
+                device=generator_device(generator),
+            )
             if span_lengths.numel() == 0:
                 continue
             occupied = torch.zeros(valid_len, dtype=torch.bool, device=device)
@@ -92,8 +97,9 @@ class SpanMaskingStrategy(MaskingStrategy):
                     if not keep:
                         continue
                     starts = torch.tensor(keep, device=device)
+                rng_device = generator_device(generator)
                 choice = starts[
-                    torch.randint(starts.numel(), (1,), generator=generator, device=device)
+                    torch.randint(starts.numel(), (1,), generator=generator, device=rng_device)
                 ].item()
                 occupied[choice : choice + span_len] = True
             mask[batch_index, valid_indices[occupied]] = True
@@ -104,27 +110,38 @@ class SpanMaskingStrategy(MaskingStrategy):
         valid_len: int,
         *,
         generator: torch.Generator | None,
+        device: torch.device,
     ) -> torch.Tensor:
         """Sample span lengths for one batch row using the configured distribution."""
         expected = self.config.mask_prob * valid_len / max(self.config.mask_length, 1)
-        num_spans = max(1, int(math.floor(expected + torch.rand((), generator=generator).item())))
+        num_spans = max(
+            1,
+            int(
+                math.floor(
+                    expected + torch.rand((), device=device, generator=generator).item()
+                )
+            ),
+        )
         if self.config.mask_selection == "static":
             return torch.full((num_spans,), self.config.mask_length, dtype=torch.long)
         if self.config.mask_selection == "uniform":
             high = max(int(self.config.mask_other), self.config.mask_length)
             low = min(int(self.config.mask_other), self.config.mask_length)
-            return torch.randint(low, high + 1, (num_spans,), generator=generator)
+            return torch.randint(
+                low, high + 1, (num_spans,), device=device, generator=generator
+            )
         if self.config.mask_selection == "normal":
             values = torch.normal(
                 mean=float(self.config.mask_length),
                 std=max(float(self.config.mask_other), 1e-6),
                 size=(num_spans,),
+                device=device,
                 generator=generator,
             )
             return values.round().clamp_min(1).long()
         if self.config.mask_selection == "poisson":
             return torch.poisson(
-                torch.full((num_spans,), float(self.config.mask_length)),
+                torch.full((num_spans,), float(self.config.mask_length), device=device),
                 generator=generator,
             ).clamp_min(1).long()
         raise ValueError(f"unsupported mask_selection {self.config.mask_selection!r}")

@@ -107,14 +107,17 @@ class ObjectiveCase:
         model = AudioModel(config.model)
         seed = model.applied_runtime.seed
         augmentor = None
+        from audiossl.rng import new_manual_seed_generator
+
+        rng_device = model.applied_runtime.device
         if config.trainer.augmentor is not None:
-            aug_gen = torch.Generator().manual_seed(derive_seed(seed, "augment"))
+            aug_gen = new_manual_seed_generator(derive_seed(seed, "augment"), rng_device)
             augmentor = AugmentationPipeline(config.trainer.augmentor, generator=aug_gen)
         cls = get_objective_registry()[config.objective.type]
         generator = None
         if getattr(cls, "uses_generator", False):
-            generator = torch.Generator().manual_seed(
-                derive_seed(seed, "objective/masking")
+            generator = new_manual_seed_generator(
+                derive_seed(seed, "objective/masking"), rng_device
             )
         return model, build_objective(
             model, config.objective, augmentor=augmentor, generator=generator

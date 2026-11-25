@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from audiossl.rng import generator_device
+
 
 def random_masking(
     x: torch.Tensor,
@@ -58,7 +60,10 @@ def random_masking(
     len_keep = _len_keep("random_masking", num_tokens, mask_ratio)
     _check_valid_mask("random_masking", valid_mask, (batch_size, num_tokens))
 
-    noise = torch.rand(batch_size, num_tokens, device=x.device, generator=generator)
+    rng_device = generator_device(generator)
+    noise = torch.rand(batch_size, num_tokens, device=rng_device, generator=generator)
+    if noise.device != x.device:
+        noise = noise.to(x.device)
     if valid_mask is not None:
         noise = noise + (~valid_mask).to(noise.dtype)
     ids_shuffle = torch.argsort(noise, dim=1)
@@ -118,7 +123,10 @@ def random_masking_group(
     _check_valid_mask("random_masking_group", valid_mask, (batch_size, num_tokens))
 
     num_groups = num_tokens // group_factor
-    noise = torch.rand(batch_size, num_groups, device=x.device, generator=generator)
+    rng_device = generator_device(generator)
+    noise = torch.rand(batch_size, num_groups, device=rng_device, generator=generator)
+    if noise.device != x.device:
+        noise = noise.to(x.device)
     if valid_mask is not None:
         group_invalid = (~valid_mask).view(batch_size, num_groups, group_factor).any(dim=-1)
         noise = noise + group_invalid.to(noise.dtype)

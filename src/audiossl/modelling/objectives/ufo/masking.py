@@ -6,6 +6,8 @@ import math
 
 import torch
 
+from audiossl.rng import generator_device
+
 
 def num_visible_tokens(*, time_patches: int, frequency_patches: int, mask_ratio: float) -> int:
     """Fixed number of visible (kept) patch tokens per row for ``mask_ratio``."""
@@ -67,14 +69,15 @@ def inverse_block_masking(
     num_blocks = 4 * math.ceil(target_visible / cells_per_block) + 16
 
     # Batched block top-left corners: (B, M).
+    rng_device = generator_device(generator)
     start_t = torch.randint(
         0, max(time_patches - block_t + 1, 1), (batch_size, num_blocks),
-        device=device, generator=generator,
-    )
+        device=rng_device, generator=generator,
+    ).to(device)
     start_f = torch.randint(
         0, max(frequency_patches - block_f + 1, 1), (batch_size, num_blocks),
-        device=device, generator=generator,
-    )
+        device=rng_device, generator=generator,
+    ).to(device)
 
     # Cell offsets within a block: (cells_per_block,).
     off_i, off_j = torch.meshgrid(
@@ -105,7 +108,9 @@ def inverse_block_masking(
     rank.scatter_reduce_(1, cell_idx, order, reduce="amin", include_self=True)
 
     # Random tiebreak within equal ranks (and among uncovered cells).
-    noise = torch.rand((batch_size, num_tokens), device=device, generator=generator)
+    noise = torch.rand((batch_size, num_tokens), device=rng_device, generator=generator)
+    if noise.device != device:
+        noise = noise.to(device)
     score = rank + noise
     if valid_mask is not None:
         if valid_mask.dtype != torch.bool or tuple(valid_mask.shape) != (batch_size, num_tokens):

@@ -11,6 +11,7 @@ from audiossl.config import AudioSSLTrainingConfig, WandBConfig, validate_config
 from audiossl.config.run import RunConfig
 from audiossl.modelling.model import AudioModel
 from audiossl.modelling.objectives import build_objective
+from audiossl.rng import new_manual_seed_generator
 from audiossl.runtime import derive_seed
 
 from .augment import AugmentationPipeline
@@ -58,10 +59,11 @@ def build_trainer(
                 "build_trainer: injected model.config does not match train_config.model"
             )
     seed = model.applied_runtime.seed
+    rng_device = model.applied_runtime.device
 
     augmentor = None
     if train_config.trainer.augmentor is not None:
-        aug_gen = torch.Generator().manual_seed(derive_seed(seed, "augment"))
+        aug_gen = new_manual_seed_generator(derive_seed(seed, "augment"), rng_device)
         augmentor = AugmentationPipeline(train_config.trainer.augmentor, generator=aug_gen)
 
     objective_cls_uses_generator = False
@@ -77,7 +79,7 @@ def build_trainer(
 
     generator = None
     if objective_cls_uses_generator:
-        generator = torch.Generator().manual_seed(derive_seed(seed, "objective/masking"))
+        generator = new_manual_seed_generator(derive_seed(seed, "objective/masking"), rng_device)
 
     objective = build_objective(
         model,

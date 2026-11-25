@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from audiossl.rng import generator_device
+
 
 @dataclass(frozen=True)
 class Wav2Vec2LossOutput:
@@ -62,6 +64,7 @@ def sample_negatives(
     indices = []
     batch, _, _ = quantized_features.shape
     flat = quantized_features.reshape(-1, quantized_features.shape[-1])
+    rng_device = generator_device(generator)
     for batch_index in range(batch):
         row_positions = torch.nonzero(mask_time_indices[batch_index], as_tuple=False).flatten()
         if row_positions.numel() == 0:
@@ -75,7 +78,7 @@ def sample_negatives(
                     max(row_features.shape[0] - 1, 1),
                     (num_negatives,),
                     generator=generator,
-                    device=quantized_features.device,
+                    device=rng_device,
                 )
                 local_choices = local_choices + (local_choices >= local_index).long()
                 local_choices = local_choices.clamp_max(row_features.shape[0] - 1)
@@ -86,7 +89,7 @@ def sample_negatives(
                     flat.shape[0],
                     (cross_sample_negatives,),
                     generator=generator,
-                    device=quantized_features.device,
+                    device=rng_device,
                 )
                 choices.append(flat[flat_choices])
                 choice_indices.append(flat_choices)

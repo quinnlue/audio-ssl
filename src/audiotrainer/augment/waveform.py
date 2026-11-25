@@ -2,6 +2,8 @@ from typing import Any
 
 import torch
 
+from audiossl.rng import generator_device
+
 
 class LoudnessAugmentation:
     required_parameters = ("p", "min_gain_db", "max_gain_db")
@@ -47,21 +49,23 @@ class LoudnessAugmentation:
             return x
 
         effective_generator = generator if generator is not None else self.generator
+        rng_device = generator_device(effective_generator)
 
         if (
             self.p < 1.0
-            and torch.rand((), device=x.device, generator=effective_generator) >= self.p
+            and torch.rand((), device=rng_device, generator=effective_generator) >= self.p
         ):
             return x
 
         if self.min_gain_db == self.max_gain_db:
             gain_db = torch.as_tensor(self.min_gain_db, device=x.device, dtype=x.dtype)
         else:
-            gain_db = torch.empty((), device=x.device, dtype=x.dtype).uniform_(
+            gain_db = torch.empty((), device=rng_device, dtype=x.dtype).uniform_(
                 self.min_gain_db,
                 self.max_gain_db,
                 generator=effective_generator,
             )
+            gain_db = gain_db.to(device=x.device, dtype=x.dtype)
 
         gain = 10.0 ** (gain_db / 20.0)
         return x * gain
