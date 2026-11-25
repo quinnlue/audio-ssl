@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "realssl"
+version = "0.1.0"
+description = "Self-supervised audio modelling and training (audiossl + audiotrainer)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "torchaudio",
+    "transformers>=4.30",
+    "huggingface_hub>=0.20",
+    "safetensors>=0.4",
+    "einops",
+    "soundfile",
+    "pyarrow>=14",
+    "joblib",
+    "wandb",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audiossl", "src/audiotrainer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-local-folder = ["harness", "testkit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
+xfail_strict = true
+markers = [
+    "integration: parity against external reference implementations (may need downloads)",
+    "slow: multi-step training or large-input checks",
+]
+filterwarnings = [
+    "ignore:`torch.nn.utils.weight_norm` is deprecated:FutureWarning",
+]
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = ["pytest>=8"]

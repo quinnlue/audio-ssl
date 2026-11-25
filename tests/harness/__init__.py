@@ -1,0 +1,65 @@
+"""Shared harness for trainer tests: configs, objective registry, reference loop, observers."""
+
+from .configs import (
+    default_optimizer,
+    tiny_conv_model_config,
+    trainer_config,
+    training_config,
+    with_device,
+    with_seed,
+)
+from .objectives import (
+    BYOL,
+    CONTRASTIVE,
+    CONTRASTIVE_AUGMENTED,
+    DEFAULT_CASE,
+    JEPA,
+    OBJECTIVE_CASES,
+    ObjectiveCase,
+    Run,
+    collate_waveforms,
+    over_objectives,
+    waveform_loader,
+)
+from .recording import (
+    FakeEvaluator,
+    HookRecorder,
+    TrainingTrace,
+    assert_trees_equal,
+    install_objective_hook,
+    known_bug,
+    snapshot,
+    spy_objective_hooks,
+)
+from .reference import accumulation_windows, lr_scale_schedule, reference_fit
+
+__all__ = [
+    "BYOL",
+    "CONTRASTIVE",
+    "CONTRASTIVE_AUGMENTED",
+    "DEFAULT_CASE",
+    "FakeEvaluator",
+    "HookRecorder",
+    "JEPA",
+    "OBJECTIVE_CASES",
+    "ObjectiveCase",
+    "Run",
+    "TrainingTrace",
+    "accumulation_windows",
+    "assert_trees_equal",
+    "collate_waveforms",
+    "default_optimizer",
+    "install_objective_hook",
+    "known_bug",
+    "lr_scale_schedule",
+    "over_objectives",
+    "reference_fit",
+    "snapshot",
+    "spy_objective_hooks",
+    "tiny_conv_model_config",
+    "trainer_config",
+    "training_config",
+    "waveform_loader",
+    "with_device",
+    "with_seed",
+]
