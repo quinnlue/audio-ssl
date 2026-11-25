@@ -68,6 +68,8 @@ from .config import (
     RopePositionalEncodingConfig,
     RuntimeConfig,
     ScalarSchedulerConfig,
+    SFTHeadConfig,
+    SFTObjectiveConfig,
     SGDOptimizerConfig,
     Sinusoidal2DPositionalEncodingConfig,
     SinusoidalPositionalEncodingConfig,
@@ -1684,6 +1686,52 @@ def _validate_ufo_objective(config: UFOObjectiveConfig) -> None:
     )
 
 
+def _validate_sft_head(config: SFTHeadConfig, *, ctx: str = "SFTHeadConfig") -> None:
+    _require_type(ctx, config, SFTHeadConfig)
+    _require_int(f"{ctx}.depth", config.depth, minimum=1)
+    if config.depth > 1:
+        _require_int(f"{ctx}.hidden_dim", config.hidden_dim, minimum=1)
+    _require_str(f"{ctx}.activation", config.activation)
+    if config.activation not in ACTIVATION_REGISTRY:
+        raise ValueError(
+            f"Unsupported {ctx}.activation {config.activation!r}; "
+            f"expected one of {sorted(ACTIVATION_REGISTRY)}"
+        )
+    _require_number(
+        f"{ctx}.dropout_p",
+        config.dropout_p,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    _require_str(f"{ctx}.initialization", config.initialization)
+    if config.initialization not in INITIALIZATION_REGISTRY:
+        raise ValueError(
+            f"Unsupported {ctx}.initialization {config.initialization!r}; "
+            f"expected one of {sorted(INITIALIZATION_REGISTRY)}"
+        )
+
+
+def _validate_sft_objective(config: SFTObjectiveConfig) -> None:
+    _require_str("SFTObjectiveConfig.type", config.type)
+    if config.type != "sft":
+        raise ValueError(f"Unsupported SFTObjectiveConfig.type {config.type!r}")
+    _require_int("SFTObjectiveConfig.num_classes", config.num_classes, minimum=2)
+    _validate_sft_head(config.head, ctx="SFTObjectiveConfig.head")
+    _require_bool("SFTObjectiveConfig.freeze_backbone", config.freeze_backbone)
+    _require_number(
+        "SFTObjectiveConfig.backbone_lr_scale",
+        config.backbone_lr_scale,
+        minimum=0.0,
+        exclusive_minimum=True,
+    )
+    _require_number(
+        "SFTObjectiveConfig.label_smoothing",
+        config.label_smoothing,
+        minimum=0.0,
+        maximum=1.0,
+    )
+
+
 def _validate_objective(config) -> None:
     if isinstance(config, ContrastiveObjectiveConfig):
         _validate_contrastive_objective(config)
@@ -1701,6 +1749,8 @@ def _validate_objective(config) -> None:
         _validate_wav2vec2_objective(config)
     elif isinstance(config, HuBERTObjectiveConfig):
         _validate_hubert_objective(config)
+    elif isinstance(config, SFTObjectiveConfig):
+        _validate_sft_objective(config)
     else:
         _validate_registered(
             config,
@@ -1708,7 +1758,7 @@ def _validate_objective(config) -> None:
             expected=(
                 "ContrastiveObjectiveConfig, BYOLObjectiveConfig, DINOObjectiveConfig, "
                 "JEPAObjectiveConfig, MAEObjectiveConfig, UFOObjectiveConfig, "
-                "Wav2Vec2ObjectiveConfig, or HuBERTObjectiveConfig"
+                "Wav2Vec2ObjectiveConfig, HuBERTObjectiveConfig, or SFTObjectiveConfig"
             ),
         )
 

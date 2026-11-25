@@ -719,6 +719,29 @@ class HuBERTObjectiveConfig:
     initialization: str = "xavier_uniform"
 
 
+@dataclass(kw_only=True, frozen=True)
+class SFTHeadConfig:
+    """MLP classification head on pooled encoder output."""
+
+    depth: int
+    hidden_dim: int
+    activation: str = "gelu"
+    dropout_p: float = 0.0
+    initialization: str = "xavier_uniform"
+
+
+@dataclass(kw_only=True, frozen=True)
+class SFTObjectiveConfig:
+    """Supervised fine-tuning for single-label audio classification."""
+
+    type: Literal["sft"] = "sft"
+    num_classes: int
+    head: SFTHeadConfig
+    freeze_backbone: bool = False
+    backbone_lr_scale: float = 1.0
+    label_smoothing: float = 0.0
+
+
 ObjectiveConfig = (
     ContrastiveObjectiveConfig
     | BYOLObjectiveConfig
@@ -728,6 +751,7 @@ ObjectiveConfig = (
     | UFOObjectiveConfig
     | Wav2Vec2ObjectiveConfig
     | HuBERTObjectiveConfig
+    | SFTObjectiveConfig
 )
 
 
@@ -1096,6 +1120,8 @@ __all__ = [
     "LRSchedulerConfig",
     "MaskingStrategyConfig",
     "OptimizerConfig",
+    "SFTHeadConfig",
+    "SFTObjectiveConfig",
     "SGDOptimizerConfig",
     "Sinusoidal2DPositionalEncodingConfig",
     "SinusoidalPositionalEncodingConfig",

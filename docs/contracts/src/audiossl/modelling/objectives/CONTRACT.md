@@ -33,7 +33,7 @@ Trainer
 
 | Direction | Type |
 | --- | --- |
-| In | `AudioBatch` only (typically raw waveform + mask at batch collation) |
+| In | `AudioBatch` only (typically raw waveform + mask at batch collation; optional `labels` `(B,)` long for `sft`) |
 | Out | `ObjectiveOutput` subclass (`ContrastiveOutput`, `JEPAOutput`, …) |
 
 Sibling components are invoked **inside** the objective according to strategy; the trainer sees only the objective boundary.
@@ -84,6 +84,7 @@ Union: `ObjectiveConfig = ContrastiveObjectiveConfig | BYOLObjectiveConfig | DIN
 | DINO | `"dino"` | `head`, `teacher_mode`, `teacher_ema_decay`, `teacher_temperature`, `student_temperature`, `center_momentum` |
 | JEPA | `"jepa"` | `loss_style`, `mask_token_init_scale`, `teacher_mode`, `predictor_config`, `masking`, norm flags |
 | MAE | `"mae"` | `decoder_d_model`, `decoder`, `decoder_positional_encoding`, `mask_token_init_scale`, `norm_pix_loss`, `norm_pix_eps`, `masking` |
+| SFT | `"sft"` | `num_classes`, `head`, `freeze_backbone`, `backbone_lr_scale`, `label_smoothing` |
 
 ### Capabilities
 
@@ -97,6 +98,7 @@ declare what they need:
 | MAE | `reconstruction_target`, `patch_grid` | `token_subsampling`, `sequence_convolution` |
 | UFO | `patch_grid`, `prefix_token` | `token_subsampling`, `sequence_convolution` |
 | wav2vec2, HuBERT | — | `token_subsampling` |
+| SFT (`sft`) | — | — |
 
 `check_objective_compatibility(model_config, objective_config)` runs during
 training-config validation and again in the objective constructor

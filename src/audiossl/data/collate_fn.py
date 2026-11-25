@@ -49,9 +49,43 @@ def collate_fn(batch: dict[str, list[torch.Tensor]]) -> AudioBatch:
     return AudioBatch(x=x, mask=mask)
 
 
+def collate_labeled_fn(batch: dict[str, list]) -> AudioBatch:
+    """Collate waveforms and integer class labels into an ``AudioBatch``."""
+
+    if not isinstance(batch, dict):
+        raise TypeError(f"batch must be dict, got {type(batch).__name__}")
+
+    if "x" not in batch:
+        raise KeyError("batch must contain key 'x'")
+    if "y" not in batch:
+        raise KeyError("batch must contain key 'y'")
+
+    xs = batch["x"]
+    ys = batch["y"]
+
+    if not isinstance(xs, list):
+        raise TypeError(f"batch['x'] must be list[torch.Tensor], got {type(xs).__name__}")
+    if not isinstance(ys, list):
+        raise TypeError(f"batch['y'] must be list[int], got {type(ys).__name__}")
+
+    if not xs:
+        raise ValueError("batch['x'] must contain at least one waveform")
+
+    validate_labels(ys)
+
+    padded = collate_fn({"x": xs})
+    labels = torch.tensor(ys, dtype=torch.long)
+    return AudioBatch(
+        x=padded.x,
+        mask=padded.mask,
+        labels=labels,
+    )
+
+
 __all__ = [
     "AudioBatch",
     "collate_fn",
+    "collate_labeled_fn",
     "validate_labels",
     "validate_sample",
 ]

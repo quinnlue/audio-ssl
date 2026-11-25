@@ -29,12 +29,16 @@ class AudioBatch:
     ``num_prefix_tokens`` counts leading non-content tokens (e.g. a CLS token
     prepended by the embedding). Pooling and objectives use it instead of
     hard-coding slice offsets.
+
+    ``labels`` optionally carries per-example class indices with shape ``(B,)``
+    and dtype ``torch.long`` for supervised objectives such as SFT classification.
     """
 
     x: torch.Tensor
     mask: torch.Tensor
     positions: torch.Tensor | None = None
     num_prefix_tokens: int = 0
+    labels: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.num_prefix_tokens, bool) or not isinstance(
@@ -62,6 +66,25 @@ class AudioBatch:
                 raise ValueError(
                     "AudioBatch.positions must match mask shape, "
                     f"got {tuple(self.positions.shape)} and {tuple(self.mask.shape)}"
+                )
+        if self.labels is not None:
+            if not isinstance(self.labels, torch.Tensor):
+                raise TypeError(
+                    "AudioBatch.labels must be torch.Tensor or None, "
+                    f"got {type(self.labels).__name__}"
+                )
+            if self.labels.dtype not in (torch.int32, torch.int64):
+                raise ValueError(
+                    f"AudioBatch.labels must be an integer tensor, got {self.labels.dtype}"
+                )
+            if self.labels.ndim != 1:
+                raise ValueError(
+                    f"AudioBatch.labels must be rank-1 (B,), got shape {tuple(self.labels.shape)}"
+                )
+            if isinstance(self.x, torch.Tensor) and self.labels.shape[0] != self.x.shape[0]:
+                raise ValueError(
+                    "AudioBatch.labels batch size must match batch.x, "
+                    f"got {self.labels.shape[0]} and {self.x.shape[0]}"
                 )
 
     def to(
@@ -251,6 +274,16 @@ class HuBERTOutput(ObjectiveOutput):
     unique_codes: torch.Tensor
 
 
+@dataclass
+class SFTOutput(ObjectiveOutput):
+    """Supervised fine-tuning classification outputs."""
+
+    loss: torch.Tensor
+    logits: torch.Tensor
+    labels: torch.Tensor
+    accuracy: torch.Tensor | None = None
+
+
 __all__ = [
     "AudioBatch",
     "TokenLayout",
@@ -265,4 +298,5 @@ __all__ = [
     "UFOOutput",
     "Wav2Vec2Output",
     "HuBERTOutput",
+    "SFTOutput",
 ]

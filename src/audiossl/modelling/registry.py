@@ -192,6 +192,7 @@ OBJECTIVES = ComponentRegistry(
         "ufo": _lazy(".objectives.ufo.ufo", "UFOObjective"),
         "wav2vec2": _lazy(".objectives.wav2vec2.wav2vec2", "Wav2Vec2Objective"),
         "hubert": _lazy(".objectives.hubert.hubert", "HuBERTObjective"),
+        "sft": _lazy(".objectives.sft.sft", "SFTObjective"),
     },
 )
 

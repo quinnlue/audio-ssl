@@ -1,0 +1,57 @@
+{
+  "model": {
+    "d_model": 16,
+    "runtime": { "seed": 0, "dtype": "float32", "device": "cpu" },
+    "processor": {
+      "type": "melspec",
+      "n_mels": 8,
+      "n_fft": 64,
+      "f_max": 8000.0,
+      "win_length": 64,
+      "hop_length": 16,
+      "log_mel": true,
+      "batch_norm": true,
+      "frame_validity": "overlap_any"
+    },
+    "tokenizer": {
+      "type": "patchify",
+      "patch_shape": [2, 4],
+      "padding_strategy": "truncate"
+    },
+    "embedding": {
+      "type": "linear",
+      "positional_encoding": {
+        "type": "learnable_2d",
+        "max_t": 128,
+        "max_f": 2
+      }
+    },
+    "encoder": {
+      "type": "transformer",
+      "num_layers": 2,
+      "mha": { "num_heads": 2 },
+      "mlp": { "d_ff": 32, "dropout_p": 0.0 },
+      "positional_encoding": { "type": "rope", "max_len": 1024 }
+    }
+  },
+  "objective": {
+    "type": "sft",
+    "num_classes": 10,
+    "freeze_backbone": false,
+    "backbone_lr_scale": 0.1,
+    "label_smoothing": 0.0,
+    "head": {
+      "depth": 2,
+      "hidden_dim": 32,
+      "activation": "gelu",
+      "dropout_p": 0.1,
+      "initialization": "xavier_uniform"
+    }
+  },
+  "trainer": {
+    "optimizer": { "type": "adamw", "lr": 0.0003, "weight_decay": 0.01, "betas": [0.9, 0.999], "eps": 1e-8, "no_weight_decay_patterns": [] },
+    "scheduler": { "type": "constant" },
+    "batch": { "per_device_batch_size": 8, "gradient_accumulation_steps": 1 },
+    "loop": { "max_epochs": 20, "gradient_clip_norm": 1.0, "nonfinite_policy": "raise", "max_consecutive_skipped_steps": 20 }
+  }
+}

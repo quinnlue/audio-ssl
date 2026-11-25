@@ -58,6 +58,8 @@ from audiossl.config import (
     ProjectionHeadConfig,
     RopePositionalEncodingConfig,
     RuntimeConfig,
+    SFTHeadConfig,
+    SFTObjectiveConfig,
     Sinusoidal2DPositionalEncodingConfig,
     SinusoidalPositionalEncodingConfig,
     SpanMaskingConfig,
@@ -413,6 +415,16 @@ def contrastive_objective(**overrides: Any) -> ContrastiveObjectiveConfig:
             view_strategy="augmentation",
             projection=projection_head(final_l2_normalize=True),
             temperature=0.5,
+        ),
+        overrides,
+    )
+
+
+def sft_objective(**overrides: Any) -> SFTObjectiveConfig:
+    return _with(
+        SFTObjectiveConfig(
+            num_classes=3,
+            head=SFTHeadConfig(depth=1, hidden_dim=D_FF),
         ),
         overrides,
     )

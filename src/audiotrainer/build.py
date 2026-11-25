@@ -16,7 +16,7 @@ from audiossl.runtime import derive_seed
 from .augment import AugmentationPipeline
 from .callbacks import Callback, ValidationCallback, WandBLogger
 from .data import DataModule
-from .evaluation import ObjectiveLossEvaluator
+from .evaluation import ClassificationEvaluator, ObjectiveLossEvaluator
 from .trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ def build_trainer(
     *,
     run_config: RunConfig | None = None,
     callbacks: Sequence[Callback] = (),
+    model: AudioModel | None = None,
 ) -> Trainer:
     """Build model, objective, loaders, evaluator, and trainer from config + data."""
 
@@ -45,7 +46,17 @@ def build_trainer(
             f"build_trainer expected DataModule, got {type(data).__name__}"
         )
 
-    model = AudioModel(train_config.model)
+    if model is None:
+        model = AudioModel(train_config.model)
+    else:
+        if not isinstance(model, AudioModel):
+            raise TypeError(
+                f"build_trainer expected AudioModel or None, got {type(model).__name__}"
+            )
+        if model.config != train_config.model:
+            raise ValueError(
+                "build_trainer: injected model.config does not match train_config.model"
+            )
     seed = model.applied_runtime.seed
 
     augmentor = None
@@ -97,13 +108,15 @@ def build_trainer(
                 "RunConfig.evaluation is set but DataModule.make_val_loader returned None"
             )
         mp = train_config.trainer.mixed_precision
-        evaluator = ObjectiveLossEvaluator(
-            objective,
-            val_loader,
-            use_autocast=mp is not None,
-            autocast_dtype=mp.dtype if mp is not None else None,
-            eval_seed=derive_seed(seed, "validation"),
-        )
+        eval_kwargs = {
+            "use_autocast": mp is not None,
+            "autocast_dtype": mp.dtype if mp is not None else None,
+            "eval_seed": derive_seed(seed, "validation"),
+        }
+        if train_config.objective.type == "sft":
+            evaluator = ClassificationEvaluator(objective, val_loader, **eval_kwargs)
+        else:
+            evaluator = ObjectiveLossEvaluator(objective, val_loader, **eval_kwargs)
         if not any(isinstance(cb, ValidationCallback) for cb in user_callbacks):
             user_callbacks.insert(0, ValidationCallback(evaluator))
 

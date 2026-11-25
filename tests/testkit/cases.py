@@ -278,6 +278,7 @@ class ObjectiveCase:
     global_rng: bool = False
     eval_forward: bool = True
     lengths: tuple[int, ...] = configs.DEFAULT_LENGTHS
+    num_classes: int | None = None
     construct: Construct | None = None
     known: Mapping[str, Known] = field(default_factory=dict)
 
@@ -307,7 +308,14 @@ class ObjectiveCase:
         return build_objective(model, config, augmentor=augmentor, generator=generator)
 
     def batch(self, seed: int = 0) -> AudioBatch:
-        return batches.waveform_batch(self.lengths, seed=seed)
+        batch = batches.waveform_batch(self.lengths, seed=seed)
+        if self.num_classes is not None:
+            generator = torch.Generator().manual_seed(seed + 17)
+            labels = torch.randint(
+                0, self.num_classes, (len(self.lengths),), generator=generator
+            )
+            return replace(batch, labels=labels)
+        return batch
 
 
 _EMA_HOOKS = frozenset({"metrics", "update_teacher", "on_after_optimizer_step"})
@@ -440,6 +448,24 @@ OBJECTIVE_CASES: tuple[ObjectiveCase, ...] = (
         teacher="frozen",
         uses_generator=True,
         construct=_construct_hubert,
+    ),
+    ObjectiveCase(
+        "sft",
+        model=c.model,
+        objective=c.sft_objective,
+        teacher="none",
+        uses_augmentor=True,
+        num_classes=3,
+        known={
+            "trainer_kwargs": Known(
+                "SFT treats the augmentor as optional at build time",
+                bug=False,
+            ),
+            "criterion_parity": Known(
+                "SFT has no separate reference criterion harness yet",
+                bug=False,
+            ),
+        },
     ),
 )
 
