@@ -99,7 +99,7 @@ class Callback:
         pass
 
     def on_checkpoint_written(self, state: TrainerState, path: Path) -> None:
-        pass
+        """Observe a finalized checkpoint file or an explicitly announced artifact directory."""
 
     def on_exception(self, state: TrainerState, exc: BaseException) -> None:
         pass

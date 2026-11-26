@@ -37,7 +37,11 @@ def _to_python_scalar(value: Any) -> float:
 
 
 class WandBLogger(Callback):
-    """Stream training metrics to wandb."""
+    """Stream metrics to a managed W&B run or an existing caller-owned run.
+
+    An existing run keeps its own lifecycle and W&B history counter. Trainer
+    step values are logged as metrics so callers can use custom chart axes.
+    """
 
     phase: ClassVar = "log"
     name: ClassVar[str] = "WandBLogger"
@@ -47,6 +51,7 @@ class WandBLogger(Callback):
         *,
         config: WandBConfig,
         train_config: AudioSSLTrainingConfig,
+        run: Any = None,
     ) -> None:
         super().__init__()
         if not isinstance(config, WandBConfig):
@@ -60,6 +65,7 @@ class WandBLogger(Callback):
             )
         self._config = config
         self._train_config = train_config
+        self._provided_run = run
         self._run: Any = None
         self._run_id: str | None = None
         self._last_logged_step = 0
@@ -74,6 +80,14 @@ class WandBLogger(Callback):
         self._run_id = state.get("run_id")
 
     def on_train_start(self, state: TrainerState) -> None:
+        self._finished = False
+        self._last_logged_step = 0
+        self._agg_sum.clear()
+        self._agg_count.clear()
+        if self._provided_run is not None:
+            self._run = self._provided_run
+            self._run_id = self._run.id
+            return
         try:
             import wandb
         except ImportError as exc:
@@ -101,12 +115,13 @@ class WandBLogger(Callback):
             self._run_id = uuid.uuid4().hex
             init_kwargs["id"] = self._run_id
         self._run = wandb.init(**init_kwargs)
-        self._finished = False
 
     def on_optimizer_step(self, state: TrainerState, ctx: StepContext) -> None:
         del ctx
         step = state.optimizer_step
-        if step == 0 or step == self._last_logged_step:
+        if self._run is None or step == 0:
+            return
+        if self._provided_run is None and step == self._last_logged_step:
             return
         metrics = dict(state.last_metrics)
         scalars = {key: _to_python_scalar(value) for key, value in metrics.items()}
@@ -118,10 +133,6 @@ class WandBLogger(Callback):
                 self._agg_count[key] = self._agg_count.get(key, 0) + 1
         if step % self._config.log_every_n_steps != 0:
             return
-        try:
-            import wandb
-        except ImportError:
-            return
         if self._config.aggregate_over_steps:
             payload = {
                 key: self._agg_sum[key] / self._agg_count[key]
@@ -131,7 +142,7 @@ class WandBLogger(Callback):
             self._agg_count.clear()
         else:
             payload = scalars
-        wandb.log(payload, step=step)
+        self._log(payload, step)
         self._last_logged_step = step
 
     def on_checkpoint_written(self, state: TrainerState, path: Path) -> None:
@@ -145,42 +156,42 @@ class WandBLogger(Callback):
             name=f"ckpt-{state.config_fingerprint[:8]}",
             type="model",
         )
-        artifact.add_file(str(path))
-        wandb.log_artifact(
+        if path.is_dir():
+            artifact.add_dir(str(path))
+            alias = path.name
+        else:
+            artifact.add_file(str(path))
+            alias = path.stem
+        self._run.log_artifact(
             artifact,
-            aliases=[path.stem, f"step-{state.optimizer_step}"],
+            aliases=[alias, f"step-{state.optimizer_step}"],
         )
 
     def on_validation_end(self, state: TrainerState) -> None:
-        if not state.last_val_metrics:
-            return
-        try:
-            import wandb
-        except ImportError:
-            return
-        wandb.log(dict(state.last_val_metrics), step=state.optimizer_step)
+        if self._run is not None and state.last_val_metrics:
+            self._log(dict(state.last_val_metrics), state.optimizer_step)
+
+    def _log(self, payload: dict[str, float], step: int) -> None:
+        if self._provided_run is None:
+            self._run.log(payload, step=step)
+        else:
+            self._run.log({**payload, "train/optimizer_step": step})
 
     def on_train_end(self, state: TrainerState) -> None:
         del state
-        self._finish()
+        self._finish(exit_code=0)
 
     def on_exception(self, state: TrainerState, exc: BaseException) -> None:
         del state, exc
-        self._finish()
+        self._finish(exit_code=1)
 
-    def _finish(self) -> None:
+    def _finish(self, *, exit_code: int) -> None:
         if self._finished:
             return
         self._finished = True
-        if self._run is None:
-            return
-        try:
-            import wandb
-        except ImportError:
-            self._run = None
-            return
-        wandb.finish()
-        self._run = None
+        run, self._run = self._run, None
+        if run is not None and self._provided_run is None:
+            run.finish(exit_code=exit_code)
 
 
 __all__ = ["WandBLogger"]

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import random
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 import torch
 
@@ -38,6 +40,23 @@ def restore_objective_generators(
         )
     for name, generator in generators.items():
         generator.set_state(states[name].cpu())
+
+
+def capture_training_rng(objective: Objective) -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "objective_generators": objective_generator_states(objective),
+    }
+
+
+def restore_training_rng(objective: Objective, rng: dict[str, Any]) -> None:
+    random.setstate(rng["python"])
+    torch.set_rng_state(rng["torch"].cpu())
+    if rng.get("cuda") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([state.cpu() for state in rng["cuda"]])
+    restore_objective_generators(objective, rng.get("objective_generators"))
 
 
 @contextmanager

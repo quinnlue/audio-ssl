@@ -5,15 +5,14 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import wandb
-from dataclasses import replace
 
 from audiossl.config import CheckpointConfig, WandBConfig
-
 from audiotrainer import Callback, WandBLogger
 
 from harness import CONTRASTIVE
@@ -129,26 +128,21 @@ class WandBLoggerConstructionTests(unittest.TestCase):
 
 
 class _RunCapture(Callback):
-    """Capture wandb state from inside the run.
-
-    ``wandb.init`` rebinds the module-level ``wandb.log`` to a new closure
-    after init runs, so any pre-init patch is lost. Patching the
-    module attributes from inside ``on_train_start`` (which fires AFTER the
-    auto-attached ``WandBLogger.on_train_start``) is the only reliable way to
-    intercept the calls.
-    """
+    """Observe the handle created by the managed logger on train start."""
 
     def __init__(self) -> None:
         self.run_id_at_train_start: str | None = None
         self.log_calls: list[tuple[dict, int | None]] = []
         self.artifact_calls: list = []
+        self._run = None
         self._original_log = None
         self._original_log_artifact = None
 
     def on_train_start(self, state) -> None:
-        if wandb.run is not None:
-            self.run_id_at_train_start = wandb.run.id
-        self._original_log = wandb.log
+        self._run = wandb.run
+        assert self._run is not None
+        self.run_id_at_train_start = self._run.id
+        self._original_log = self._run.log
         captured_log = self.log_calls
 
         def _capture_log(*args, **kwargs):
@@ -157,23 +151,23 @@ class _RunCapture(Callback):
             captured_log.append((dict(data), step))
             return self._original_log(*args, **kwargs)
 
-        wandb.log = _capture_log
+        self._run.log = _capture_log
 
-        self._original_log_artifact = wandb.log_artifact
+        self._original_log_artifact = self._run.log_artifact
         captured_artifact = self.artifact_calls
 
         def _capture_artifact(artifact, *args, **kwargs):
             captured_artifact.append((artifact, args, kwargs))
             return None
 
-        wandb.log_artifact = _capture_artifact
+        self._run.log_artifact = _capture_artifact
 
     def on_train_end(self, state) -> None:
         if self._original_log is not None:
-            wandb.log = self._original_log
+            self._run.log = self._original_log
             self._original_log = None
         if self._original_log_artifact is not None:
-            wandb.log_artifact = self._original_log_artifact
+            self._run.log_artifact = self._original_log_artifact
             self._original_log_artifact = None
 
 

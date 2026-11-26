@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import torch
-from audiossl.config import CheckpointConfig, EvaluationConfig, WandBConfig
-from harness.configs import run_config
 
+from audiossl.config import CheckpointConfig, EvaluationConfig, WandBConfig
 from audiotrainer import ObjectiveLossEvaluator, ValidationCallback
 
 from harness import (
@@ -28,6 +28,7 @@ from harness import (
     waveform_loader,
     with_seed,
 )
+from harness.configs import run_config
 
 
 @over_objectives
@@ -113,8 +114,7 @@ def test_observers_do_not_change_the_trained_model(
 ) -> None:
     import wandb as wandb_module
 
-    for name in ("init", "log", "finish"):
-        monkeypatch.setattr(wandb_module, name, lambda *a, **k: None)
+    monkeypatch.setattr(wandb_module, "init", Mock(return_value=Mock(spec=["log", "finish"])))
     setup = observer(tmp_path)
     bare = DEFAULT_CASE.run(num_batches=4, max_epochs=2)
     bare_trace = bare.fit()

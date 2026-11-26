@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import random
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -12,7 +11,7 @@ import torch
 from audiossl.config.run import CheckpointConfig
 
 from ..fingerprint import _to_plain
-from ..rng import objective_generator_states
+from ..rng import capture_training_rng
 from ..state import TrainerState
 from .callback import Callback
 
@@ -36,14 +35,7 @@ def build_checkpoint_payload(
 ) -> dict[str, Any]:
     """Build the on-disk checkpoint payload. Exposed for testing and tooling."""
 
-    rng = {
-        "python": random.getstate(),
-        "torch": torch.get_rng_state(),
-        "cuda": (
-            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-        ),
-        "objective_generators": objective_generator_states(state.objective),
-    }
+    rng = capture_training_rng(state.objective)
     # Single source of truth: objective_state includes the student model.
     objective_state = state.objective.state_dict()
     from dataclasses import asdict

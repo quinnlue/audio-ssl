@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
 from audiossl.config import (
     CheckpointConfig,
     EvaluationConfig,
@@ -13,7 +15,6 @@ from audiossl.config import (
     WandBConfig,
     validate_config,
 )
-
 from audiotrainer import ValidationCallback
 
 from harness import DEFAULT_CASE, FakeEvaluator
@@ -64,13 +65,11 @@ def test_val_metrics_are_prefixed_into_state_and_logged_to_wandb(
     logged: list[tuple[dict, int | None]] = []
     import wandb as wandb_module
 
-    monkeypatch.setattr(wandb_module, "init", lambda **kwargs: object())
-    monkeypatch.setattr(wandb_module, "finish", lambda: None)
-    monkeypatch.setattr(
-        wandb_module,
-        "log",
-        lambda payload, step=None: logged.append((dict(payload), step)),
+    handle = SimpleNamespace(
+        log=lambda payload, step=None: logged.append((dict(payload), step)),
+        finish=lambda **kwargs: None,
     )
+    monkeypatch.setattr(wandb_module, "init", lambda **kwargs: handle)
     run = DEFAULT_CASE.run(
         num_batches=2,
         checkpoint=CheckpointConfig(save_dir=str(tmp_path)),

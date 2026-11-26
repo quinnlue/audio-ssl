@@ -42,3 +42,29 @@ trainer.fit()
 ```
 
 Set `objective.freeze_backbone: true` for linear probe training, or tune `backbone_lr_scale` for differential learning rates. Validation logs `val/loss` and `val/accuracy` when `RunConfig.evaluation` is enabled.
+
+## Caller-defined training updates
+
+Use `Trainer` with `train_loader=None` and set `train_config.trainer.loop.max_steps` to the scheduler horizon. Within one `update_session()`, pass each optimizer update as a group of microbatches. The objective supplies a mean loss per microbatch. For wav2vec2, weight that mean by its masked-frame count.
+
+```python
+from audiotrainer import Trainer
+
+
+def masked_frames(output):
+    return output.time_mask_indices.sum().item()
+
+
+trainer = Trainer(model, objective, None, train_config, data_fingerprint=data_revision)
+with trainer.update_session():
+    trainer.train_update(microbatches, loss_weight=masked_frames)
+    fork = trainer.snapshot(data_state=stream.state())
+    trainer.train_update(decay_microbatches, loss_weight=masked_frames, learning_rate=decay_lr)
+    export_branch(trainer.state, branch_dir)
+    trainer.announce_artifact(branch_dir)
+    stream.load_state_dict(trainer.restore(fork))
+```
+
+The caller controls update windows, stopping, and the data cursor. Snapshots restore optimizer, scheduler, and RNG state between updates. Artifact notifications go to `on_checkpoint_written` after the caller finalizes the file or directory.
+
+Supply an existing W&B run as `WandBLogger(..., run=wandb_run)` to keep control of its lifecycle. The logger records optimizer step as a metric so custom chart axes can show repeated steps after a restore.

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import math
-import random
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -21,7 +21,7 @@ from audiossl.config import (
     MixedPrecisionConfig,
     validate_config,
 )
-from audiossl.config.batch_dataclasses import AudioBatch
+from audiossl.config.batch_dataclasses import AudioBatch, ObjectiveOutput
 from audiossl.config.run import RunConfig
 from audiossl.modelling.model import AudioModel
 from audiossl.modelling.objectives._base import OBJECTIVE_HOOKS, Objective
@@ -34,12 +34,13 @@ from .callbacks import (
     StdoutLogger,
     ValidationCallback,
     WandBLogger,
+    build_checkpoint_payload,
     sort_callbacks,
 )
 from .fingerprint import config_fingerprint, resume_compatible_payload
 from .optim import build_optimizer, build_scheduler
 from .provenance import assert_clean_git, collect_provenance
-from .rng import restore_objective_generators
+from .rng import restore_training_rng
 from .state import TrainerState
 from .step import StepContext
 
@@ -50,6 +51,36 @@ _MP_DTYPES = {
     "float16": torch.float16,
 }
 _THROUGHPUT_EMA_ALPHA = 0.1
+_SNAPSHOT_FIELDS = (
+    "epoch",
+    "global_step",
+    "optimizer_step",
+    "skipped_optimizer_steps",
+    "consecutive_skipped_steps",
+    "last_loss",
+    "current_lr",
+    "last_grad_norm",
+    "last_input_seconds",
+    "last_throughput_audio_seconds_per_sec",
+    "last_metrics",
+    "last_val_metrics",
+    "best_metric",
+    "best_optimizer_step",
+)
+
+
+def _copy_to_cpu(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu", copy=True)
+    if isinstance(value, dict):
+        result = copy.copy(value)
+        result.update((key, _copy_to_cpu(item)) for key, item in value.items())
+        return result
+    if isinstance(value, list):
+        return [_copy_to_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_to_cpu(item) for item in value)
+    return copy.deepcopy(value)
 
 
 def _configure_package_logging(run_dir: Path | None) -> None:
@@ -84,7 +115,7 @@ class Trainer:
         self,
         model: AudioModel,
         objective: Objective,
-        train_loader: DataLoader,
+        train_loader: DataLoader | None,
         train_config: AudioSSLTrainingConfig,
         *,
         run_config: RunConfig | None = None,
@@ -95,9 +126,9 @@ class Trainer:
             raise TypeError(f"Trainer expected AudioModel, got {type(model).__name__}")
         if not isinstance(objective, Objective):
             raise TypeError(f"Trainer expected Objective, got {type(objective).__name__}")
-        if not isinstance(train_loader, DataLoader):
+        if train_loader is not None and not isinstance(train_loader, DataLoader):
             raise TypeError(
-                f"Trainer expected torch DataLoader, got {type(train_loader).__name__}"
+                f"Trainer expected torch DataLoader or None, got {type(train_loader).__name__}"
             )
         if not isinstance(train_config, AudioSSLTrainingConfig):
             raise TypeError(
@@ -144,24 +175,28 @@ class Trainer:
             getattr(type(objective), "callbacks", None)
         ):
             # Reject the legacy dict attribute, not the Callback list method.
-            attr = getattr(objective, "callbacks")
+            attr = objective.callbacks
             if isinstance(attr, dict):
                 raise TypeError(
                     f"Trainer: {type(objective).__name__}.callbacks is no longer supported; "
-                    f"override the Objective lifecycle methods instead: {', '.join(OBJECTIVE_HOOKS)}"
+                    "override the Objective lifecycle methods instead: "
+                    f"{', '.join(OBJECTIVE_HOOKS)}"
                 )
 
         trainer_cfg = train_config.trainer
         batch_cfg = trainer_cfg.batch
         loop_cfg = trainer_cfg.loop
 
-        if train_loader.batch_size not in (None, batch_cfg.per_device_batch_size):
+        if train_loader is not None and train_loader.batch_size not in (
+            None,
+            batch_cfg.per_device_batch_size,
+        ):
             raise ValueError(
                 "Trainer: train_loader.batch_size "
                 f"({train_loader.batch_size}) != trainer.batch.per_device_batch_size "
                 f"({batch_cfg.per_device_batch_size})"
             )
-        if getattr(train_loader, "drop_last", None) not in (None, batch_cfg.drop_last):
+        if train_loader is not None and train_loader.drop_last not in (None, batch_cfg.drop_last):
             raise ValueError(
                 "Trainer: train_loader.drop_last "
                 f"({train_loader.drop_last}) != trainer.batch.drop_last ({batch_cfg.drop_last})"
@@ -290,10 +325,13 @@ class Trainer:
         self._throughput_ema: float | None = None
         self._pending_step_input_seconds = 0.0
         self._pending_step_loss_sum = 0.0
-        self._pending_step_loss_count = 0
+        self._pending_step_loss_count: float = 0
         self._start_epoch = 0
         self._resume_batch_index = 0
         self._stop = False
+        self._update_session_active = False
+        self._updating = False
+        self._last_output: ObjectiveOutput | None = None
 
     @classmethod
     def from_config(
@@ -312,6 +350,8 @@ class Trainer:
         )
 
     def fit(self) -> TrainerState:
+        if self.train_loader is None:
+            raise RuntimeError("Trainer.fit requires a DataLoader; use update_session()")
         self._last_step_perf_counter = None
         self._throughput_ema = None
         self._pending_step_input_seconds = 0.0
@@ -344,6 +384,150 @@ class Trainer:
             finally:
                 raise
         return self.state
+
+    @contextlib.contextmanager
+    def update_session(self) -> Iterator[Trainer]:
+        """Run caller-defined updates with one training and epoch lifecycle.
+
+        Construct with ``train_loader=None`` and set ``loop.max_steps`` for
+        the scheduler horizon. The caller controls the actual stop point.
+        """
+        if self.train_loader is not None or self._update_session_active:
+            raise RuntimeError("Trainer.update_session requires an idle loader-free trainer")
+        self._update_session_active = True
+        self._last_step_perf_counter = time.perf_counter()
+        try:
+            self._call_callbacks("on_train_start")
+            self._call_objective_hooks("on_train_start")
+            self._call_callbacks("on_train_epoch_start")
+            self._call_objective_hooks("on_epoch_start")
+            self._clear_accumulation()
+            yield self
+            self._call_objective_hooks("on_epoch_end")
+            self._call_callbacks("on_train_epoch_end")
+            self._call_objective_hooks("on_train_end")
+            self._call_callbacks("on_train_end")
+        except BaseException as exc:
+            try:
+                self._call_callbacks("on_exception", exc=exc)
+            finally:
+                raise
+        finally:
+            self._update_session_active = False
+
+    def train_update(
+        self,
+        microbatches: Sequence[AudioBatch],
+        *,
+        loss_weight: Callable[[ObjectiveOutput], float] | None = None,
+        learning_rate: float | None = None,
+    ) -> bool:
+        """Apply one update inside ``update_session`` and return whether it stepped.
+
+        The objective returns a microbatch mean. ``loss_weight`` supplies its
+        positive denominator (for example, the number of masked frames), or
+        each microbatch receives equal weight. A caller-supplied learning rate
+        applies to all parameter groups and bypasses the scheduler on this step.
+        """
+        if not self._update_session_active or self._updating:
+            raise RuntimeError("Trainer.train_update requires an active update session")
+        microbatch_count = len(microbatches)
+        if microbatch_count == 0:
+            raise ValueError("Trainer.train_update requires at least one microbatch")
+        if learning_rate is not None and (not math.isfinite(learning_rate) or learning_rate < 0):
+            raise ValueError("Trainer.train_update learning_rate must be finite and nonnegative")
+
+        self._updating = True
+        initial_step = self.state.optimizer_step
+        weight_sum = 0.0
+        metric_sums: dict[str, float] = {}
+        metric_weights: dict[str, float] = {}
+        try:
+            self.objective.train()
+            for index, microbatch in enumerate(microbatches, start=1):
+                batch, output = self._forward_batch(microbatch)
+                self.state.global_step += 1
+                if not torch.isfinite(output.loss).all():
+                    self._handle_nonfinite("loss", float("nan"))
+                    self._clear_accumulation()
+                    return False
+                weight = 1.0 if loss_weight is None else float(loss_weight(output))
+                if not math.isfinite(weight) or weight <= 0:
+                    raise ValueError(
+                        "Trainer.train_update loss weights must be finite and positive"
+                    )
+                loss = output.loss
+                if loss.dtype in (torch.float16, torch.bfloat16):
+                    loss = loss.float()
+                self._backward(loss * weight)
+                self._pending_step_loss_sum += float(output.loss.detach().item()) * weight
+                weight_sum += weight
+                for key, value in self._objective_metrics(output, self._step_context()).items():
+                    metric_sums[key] = metric_sums.get(key, 0.0) + weight * value
+                    metric_weights[key] = metric_weights.get(key, 0.0) + weight
+
+                if index == microbatch_count:
+                    self._pending_step_loss_count = weight_sum
+                    self.state.last_input_seconds = self._pending_step_input_seconds
+                    self._optimizer_step_boundary(
+                        grad_divisor=weight_sum,
+                        learning_rate=learning_rate,
+                        objective_metrics={
+                            key: value / metric_weights[key] for key, value in metric_sums.items()
+                        },
+                    )
+                self._call_callbacks("on_train_batch_end", batch=batch, output=output)
+            return self.state.optimizer_step > initial_step
+        except BaseException:
+            self._clear_accumulation()
+            raise
+        finally:
+            self._last_output = None
+            self._updating = False
+
+    def snapshot(self, *, data_state: Any = None) -> dict[str, Any]:
+        """Copy loader-free training state to CPU between updates, including caller data state."""
+        if self.train_loader is not None or self._updating:
+            raise RuntimeError("Trainer.snapshot requires a loader-free update boundary")
+        payload = build_checkpoint_payload(self.state)
+        if getattr(self.objective, "model", None) is self.model:
+            del payload["model_state"]
+        else:
+            payload["model_state"] = self.model.state_dict()
+        payload["update_state"] = {name: getattr(self.state, name) for name in _SNAPSHOT_FIELDS}
+        payload["scaler_state"] = self._scaler.state_dict() if self._scaler is not None else None
+        snapshot = _copy_to_cpu(payload)
+        snapshot["data_state"] = copy.deepcopy(data_state)
+        return snapshot
+
+    def restore(self, snapshot: dict[str, Any]) -> Any:
+        """Restore a snapshot between updates and return an independent copy of its data state."""
+        if self.train_loader is not None or self._updating:
+            raise RuntimeError("Trainer.restore requires a loader-free update boundary")
+        if snapshot["config_fingerprint"] != self.state.config_fingerprint:
+            raise ValueError("Trainer.restore: snapshot fingerprint does not match the trainer")
+        self.objective.load_state_dict(snapshot["objective_state"])
+        if "model_state" in snapshot:
+            self.model.load_state_dict(snapshot["model_state"])
+        self.optimizer.load_state_dict(copy.deepcopy(snapshot["optimizer_state"]))
+        self.scheduler.load_state_dict(copy.deepcopy(snapshot["scheduler_state"]))
+        self._clear_accumulation()
+        if self._scaler is not None:
+            self._scaler.load_state_dict(snapshot["scaler_state"])
+        for name in _SNAPSHOT_FIELDS:
+            setattr(self.state, name, copy.deepcopy(snapshot["update_state"][name]))
+        restore_training_rng(self.objective, snapshot["rng"])
+        self._throughput_ema = self.state.last_throughput_audio_seconds_per_sec
+        self._last_step_perf_counter = time.perf_counter()
+        self._last_output = None
+        return copy.deepcopy(snapshot["data_state"])
+
+    def announce_artifact(self, path: str | Path) -> None:
+        """Notify checkpoint consumers after the caller has finalized a file or directory."""
+        path = Path(path)
+        if not (path.is_file() or path.is_dir()):
+            raise FileNotFoundError(path)
+        self._emit_event("checkpoint_written", path=path)
 
     @classmethod
     def from_checkpoint(
@@ -488,12 +672,7 @@ class Trainer:
             if name in callback_states:
                 callback.load_state_dict(callback_states[name])
 
-        rng = payload["rng"]
-        random.setstate(rng["python"])
-        torch.set_rng_state(rng["torch"].cpu())
-        if rng.get("cuda") is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all([s.cpu() for s in rng["cuda"]])
-        restore_objective_generators(objective, rng.get("objective_generators"))
+        restore_training_rng(objective, payload["rng"])
         return trainer
 
     # ---------------- internals ------------------------------------------
@@ -502,6 +681,8 @@ class Trainer:
         loop = self.train_config.trainer.loop
         if loop.max_steps is not None:
             return max(loop.max_steps, 1)
+        if self.train_loader is None:
+            raise ValueError("Trainer: loader-free training requires TrainingLoopConfig.max_steps")
         try:
             n_batches = len(self.train_loader)
         except TypeError as exc:
@@ -572,7 +753,19 @@ class Trainer:
             step_was_skipped=step_was_skipped,
         )
 
+    def _forward_batch(self, batch: AudioBatch) -> tuple[AudioBatch, ObjectiveOutput]:
+        batch = self._move_batch(batch)
+        input_seconds = float(batch.mask.sum().item()) / self._sample_rate_hz
+        self.state.last_input_seconds = input_seconds
+        self._pending_step_input_seconds += input_seconds
+        self._call_callbacks("on_train_batch_start", batch=batch)
+        with self._autocast_ctx():
+            output = self.objective(batch)
+        self._call_objective_hooks("on_after_forward", output)
+        return batch, output
+
     def _train_epoch(self) -> None:
+        assert self.train_loader is not None
         self.objective.train()
         self.optimizer.zero_grad(set_to_none=True)
         try:
@@ -597,17 +790,7 @@ class Trainer:
                 self._stop = True
                 break
 
-            batch = self._move_batch(batch)
-            valid_samples = float(batch.mask.sum().item())
-            batch_input_seconds = valid_samples / self._sample_rate_hz
-            self.state.last_input_seconds = batch_input_seconds
-            self._pending_step_input_seconds += batch_input_seconds
-            self._call_callbacks("on_train_batch_start", batch=batch)
-
-            with self._autocast_ctx():
-                output = self.objective(batch)
-            self._call_objective_hooks("on_after_forward", output)
-
+            batch, output = self._forward_batch(batch)
             loss = output.loss
             if not torch.isfinite(loss).all():
                 self._handle_nonfinite("loss", float("nan"))
@@ -638,13 +821,28 @@ class Trainer:
     def _window_size(self, batch_index: int, n_batches: int | None) -> int:
         if n_batches is None:
             return self._grad_accum_steps
-        remaining = n_batches - (batch_index - (batch_index % self._grad_accum_steps or self._grad_accum_steps))
         # Size of the current accumulation window ending at or after batch_index.
         start = batch_index - ((batch_index - 1) % self._grad_accum_steps)
         end = min(start + self._grad_accum_steps - 1, n_batches)
         return end - start + 1
 
-    def _optimizer_step_boundary(self) -> None:
+    def _clear_accumulation(self) -> None:
+        self.optimizer.zero_grad(set_to_none=True)
+        self._pending_step_input_seconds = 0.0
+        self._pending_step_loss_sum = 0.0
+        self._pending_step_loss_count = 0
+
+    def _optimizer_step_boundary(
+        self,
+        *,
+        grad_divisor: float | None = None,
+        learning_rate: float | None = None,
+        objective_metrics: dict[str, float] | None = None,
+    ) -> None:
+        if grad_divisor is not None:
+            for param in self.objective.parameters():
+                if param.grad is not None:
+                    param.grad.div_(grad_divisor)
         self._call_objective_hooks("on_before_optimizer_step")
         trainable_params = [p for p in self.objective.parameters() if p.requires_grad]
 
@@ -660,14 +858,16 @@ class Trainer:
         )
         if not torch.isfinite(grad_norm):
             self._handle_nonfinite("grad_norm", float(grad_norm))
-            self.optimizer.zero_grad(set_to_none=True)
-            self._pending_step_input_seconds = 0.0
-            self._pending_step_loss_sum = 0.0
-            self._pending_step_loss_count = 0
+            if self._scaler is not None:
+                self._scaler.update()
+            self._clear_accumulation()
             return
 
         self.state.last_grad_norm = float(grad_norm)
         scale_before = self._scaler.get_scale() if self._scaler is not None else None
+        if learning_rate is not None:
+            for group in self.optimizer.param_groups:
+                group["lr"] = learning_rate
         self._step_optimizer()
         skipped = False
         if self._scaler is not None and scale_before is not None:
@@ -679,14 +879,11 @@ class Trainer:
             self._handle_nonfinite("grad_scaler", float("nan"), count_only=True)
             ctx = self._step_context(step_was_skipped=True)
             self._call_objective_hooks("on_after_optimizer_step", ctx_override=ctx)
-            self.optimizer.zero_grad(set_to_none=True)
-            self._pending_step_input_seconds = 0.0
-            self._pending_step_loss_sum = 0.0
-            self._pending_step_loss_count = 0
+            self._clear_accumulation()
             return
 
-        self.scheduler.step()
-        self.optimizer.zero_grad(set_to_none=True)
+        if learning_rate is None:
+            self.scheduler.step()
         self.state.optimizer_step += 1
         self.state.consecutive_skipped_steps = 0
         self.state.current_lr = float(self.optimizer.param_groups[0]["lr"])
@@ -695,19 +892,19 @@ class Trainer:
                 self._pending_step_loss_sum / self._pending_step_loss_count
             )
         self._update_throughput(self._pending_step_input_seconds)
-        self._pending_step_input_seconds = 0.0
-        self._pending_step_loss_sum = 0.0
-        self._pending_step_loss_count = 0
+        self._clear_accumulation()
 
         ctx = self._step_context(step_was_skipped=False)
         self._call_objective_hooks("on_after_optimizer_step", ctx_override=ctx)
-        self.state.last_metrics = self._collect_metrics(ctx)
+        self.state.last_metrics = self._collect_metrics(ctx, objective_metrics)
         self._call_callbacks("on_optimizer_step", ctx=ctx)
 
         if self._max_steps is not None and self.state.optimizer_step >= self._max_steps:
             self._stop = True
 
-    def _collect_metrics(self, ctx: StepContext) -> dict[str, float]:
+    def _collect_metrics(
+        self, ctx: StepContext, objective_metrics: dict[str, float] | None = None
+    ) -> dict[str, float]:
         metrics: dict[str, float] = {
             "train/loss": float(self.state.last_loss or 0.0),
             "train/epoch": float(ctx.epoch),
@@ -724,20 +921,20 @@ class Trainer:
             metrics["train/throughput_audio_seconds_per_sec"] = float(
                 self.state.last_throughput_audio_seconds_per_sec
             )
-        objective_type = getattr(self.train_config.objective, "type", "objective")
-        # metrics() may still accept legacy (output, state) — pass ctx only.
-        # Callers that need the last output should have stored it; here we only
-        # have trainer telemetry unless the objective metrics are side-effect free
-        # and don't need the output. Prefer reading from a cached last output.
-        last_output = getattr(self, "_last_output", None)
-        if last_output is not None:
-            raw = self.objective.metrics(last_output, ctx)
-            for key, value in raw.items():
-                if isinstance(value, torch.Tensor):
-                    metrics[f"train/{objective_type}/{key}"] = float(value.detach().item())
-                else:
-                    metrics[f"train/{objective_type}/{key}"] = float(value)
+        if objective_metrics is None and self._last_output is not None:
+            objective_metrics = self._objective_metrics(self._last_output, ctx)
+        if objective_metrics is not None:
+            metrics.update(objective_metrics)
         return metrics
+
+    def _objective_metrics(self, output: ObjectiveOutput, ctx: StepContext) -> dict[str, float]:
+        objective_type = getattr(self.train_config.objective, "type", "objective")
+        result = {}
+        for key, value in self.objective.metrics(output, ctx).items():
+            if isinstance(value, torch.Tensor):
+                value = value.detach().item()
+            result[f"train/{objective_type}/{key}"] = float(value)
+        return result
 
     def _handle_nonfinite(
         self, kind: str, value: float, *, count_only: bool = False
